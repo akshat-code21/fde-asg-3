@@ -5,6 +5,7 @@ from src.contracts import Architecture, ProcurementDecision, RunTelemetry
 from src.data_access import get_request
 from src.decision_builder import build_approvals, build_recommendation, build_risk_flags
 from src.evidence_builder import build_evidence
+from src.llm_client import review_decision
 from src.policy_checks import detect_injection, missing_information, norm_status, parse_date
 from src.policy_engine import policy_threshold_tool
 from src.telemetry import RunTelemetryCounter
@@ -58,5 +59,22 @@ def handle_request(request_id: str, architecture: Architecture = "single") -> Pr
     risk_flags = build_risk_flags(budget, catalog, policy, vendor_unavailable, vendor_expired_or_missing, vendor_conflict, missing, injected)
     evidence = build_evidence(emp_rows=emp_rows, dept=dept, requester_id=request.get("requester_id"), budget=budget, catalog=catalog, internal=internal, external=external, ext_status=ext_status, ext_date=ext_date, vendor_name=vendor_name, vendor_unavailable=vendor_unavailable, vendor_conflict=vendor_conflict, policy=policy, required_approvals=required_approvals, injected=injected)
     recommendation, next_step = build_recommendation(missing, vendor_unavailable, budget, required_approvals)
+    if architecture == "staged":
+        # LLM reviewer (advisory only): polish wording, never change policy.
+        # Falls back to deterministic text on any failure/no key.
+        try:
+            reviewed = review_decision(
+                recommendation=recommendation,
+                next_step=next_step,
+                required_approvals=required_approvals,
+                risk_flags=risk_flags,
+                evidence_findings=[e.finding for e in evidence],
+                business_justification=str(request.get("business_justification", "")),
+                counter=counter,
+            )
+        except Exception:
+            reviewed = None
+        if reviewed:
+            recommendation, next_step = reviewed["recommendation"], reviewed["next_step"]
     telemetry = RunTelemetry(llm_calls=counter.llm_calls, tool_calls=counter.tool_calls, tool_names=list(counter.tool_names))
     return ProcurementDecision(request_id=request_id, recommendation=recommendation, evidence=evidence, required_approvals=required_approvals, missing_information=missing, risk_flags=risk_flags, next_step=next_step, human_review_required=True, telemetry=telemetry)
